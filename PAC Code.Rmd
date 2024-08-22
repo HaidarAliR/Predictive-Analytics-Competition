@@ -1,0 +1,353 @@
+---
+title: "PAC Report"
+author: "Haidar Ali Rizqi"
+date: "2023-11-28"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Car Price Prediction
+
+## Problem Statement
+
+There is a dataset on 40,000 used cars, describing each car based on its features and its condition. I was assigned to construct a model to predict sale price of a used car based on its features and condition and use it to generate predictions for a set of unlabeled data. The accuracy of the model will be evaluated based on RMSE.
+
+## Steps
+
+### 1. Importing required library
+
+The first steps are to import libraries that will be used on the analysis. I used dplyr as the data wrangling tools, fastDummies for transforming categorical columns into numerical, and modeling libraries such as rpart, caret and ranger.
+
+```{r}
+library(dplyr)
+library(fastDummies)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(ranger)
+library(gbm)
+```
+
+### 2. Reading and Understanding Data
+
+The next step is to load the data into workspace and start exploring each of the feature. In summary, there are 46 columns, consisting of 1 ID column, 1 label column and 44 feature columns with 18 are numerical and 26 are categorical.
+
+```{r}
+data = read.csv('/Users/haidar/Documents/Master/Applied Analytics/Fall 2023/Analytics Framework/PAC/analysisData.csv')
+scoringData = read.csv('/Users/haidar/Documents/Master/Applied Analytics/Fall 2023/Analytics Framework/PAC/scoringData.csv')
+
+numerical_columns <- sapply(data, is.numeric)
+categorical_columns <- sapply(data, is.character)
+
+num_numerical_columns <- sum(numerical_columns)
+num_categorical_columns <- sum(categorical_columns)
+
+cat("Number of Numerical Columns:", num_numerical_columns, "\n")
+cat("Number of Categorical Columns:", num_categorical_columns, "\n")
+
+```
+
+### 3. Feature Extraction
+
+Once I observed each column, I noticed there are several columns that need to be transformed into numerical features to be useful. These columns are Torque and Power. Torque contains two information: horsepower and weight, while Power contains horsepower and RPM. Hence, I extracted these features and create 4 new columns.
+
+```{r}
+
+#Extracting power and torque in training data
+#power
+
+data <- data %>%
+  separate(power, into = c("HP", "RPM"), sep = " @ ", extra = "merge") %>%
+  separate(HP, into = c("power_HP", "discard"), sep = " ", convert = TRUE) %>%
+  separate(RPM, into = c("power_RPM", "discard"), sep = " ", convert = TRUE) %>%
+  mutate(power_RPM = as.integer(gsub(",", "", power_RPM)))  # Remove commas and convert RPM_value to integer
+
+#torque
+data <- data %>%
+  separate(torque, into = c("torque_weight", "torque_RPM"), sep = " @ ", extra = "merge") %>%
+  separate(torque_weight, into = c("torque_weight", "discard"), sep = " ", convert = TRUE) %>%
+  separate(torque_RPM, into = c("torque_RPM", "discard"), sep = " ", convert = TRUE) %>%
+  mutate(torque_RPM = as.integer(gsub(",", "", torque_RPM)))  # Remove commas and convert RPM_value to integer
+
+
+#Extracting power and torque in scoring data
+#power
+scoringData <- scoringData %>%
+  separate(power, into = c("HP", "RPM"), sep = " @ ", extra = "merge") %>%
+  separate(HP, into = c("power_HP", "discard"), sep = " ", convert = TRUE) %>%
+  separate(RPM, into = c("power_RPM", "discard"), sep = " ", convert = TRUE) %>%
+  mutate(power_RPM = as.integer(gsub(",", "", power_RPM)))  # Remove commas and convert RPM_value to integer
+
+#torque
+scoringData <- scoringData %>%
+  separate(torque, into = c("torque_weight", "torque_RPM"), sep = " @ ", extra = "merge") %>%
+  separate(torque_weight, into = c("torque_weight", "discard"), sep = " ", convert = TRUE) %>%
+  separate(torque_RPM, into = c("torque_RPM", "discard"), sep = " ", convert = TRUE) %>%
+  mutate(torque_RPM = as.integer(gsub(",", "", torque_RPM)))  # Remove commas and convert RPM_value to integer
+```
+
+### 4. Data Imputation
+
+#### 4.a Numerical Data
+
+I chose median method to fill the null values for numerical columns. But, instead of using the median of each column, I used the median value of the column based on the car brand and trim name. The rationale choosing this step is that each car brand and trim name has it's own characteristics and cannot be generalized into one number. For example, the Ford F-150 (double-cabin car) has a different characteristics (e.g. power, torque, legroom length) compared to Toyota Corolla (sedan car). Intuitively, this method could lead to a more precise approximation for each car. The downside of this method is that some car brands and trim that have no available data will stay null.
+
+```{r}
+#Fill up NAs with the median in analysisData
+# Get the names of numeric columns
+numeric_cols <- names(data)[sapply(data, is.numeric)]
+
+# Calculate median values per make_name, model_name, trim_name for numeric columns
+medians_df <- data %>%
+  group_by(make_name,model_name) %>%
+  summarise(across(all_of(numeric_cols), median, na.rm = TRUE))
+
+medians_df
+
+# Merge median values back to the original data frame
+df_imputed <- data %>%
+  left_join(medians_df, by = c("make_name","model_name"), suffix=c("","_median"))
+
+df_imputed <- df_imputed %>%
+  mutate(across(numeric_cols,~ifelse(is.na(.), get(paste0(cur_column(),"_median")), .)))
+
+# delete all the median columns
+df_imputed <- df_imputed %>%
+  select(-ends_with("_median"))
+
+
+
+
+
+#Fill up NAs with the median in scoringData
+# Get the names of numeric columns
+numeric_cols_df2 <- names(scoringData)[sapply(scoringData, is.numeric)]
+
+# Calculate median values per make_name, model_name, trim_name for numeric columns
+medians_df2 <- scoringData %>%
+  group_by(make_name,model_name) %>%
+  summarise(across(all_of(numeric_cols_df2), median, na.rm = TRUE))
+
+# Merge median values back to the original data frame
+df2_imputed <- scoringData %>%
+  left_join(medians_df2, by = c("make_name","model_name"), suffix=c("","_median"))
+
+df2_imputed <- df2_imputed %>%
+  mutate(across(numeric_cols_df2,~ifelse(is.na(.), get(paste0(cur_column(),"_median")), .)))
+
+# delete all the median columns
+df2_imputed <- df2_imputed %>%
+  select(-ends_with("_median"))
+
+```
+
+#### 4.b. Categorical Data
+
+As for categorical data, I only impute column is_cpo (CPO: Certified pre-owned) since the data description says null values in the columns means it is not certified. Hence, null values is replaced by 0. I leave null values in other categorical values unchanged.
+
+```{r}
+#impute categorical data
+df_imputed$is_cpo[is.na(df_imputed$is_cpo)] = FALSE
+
+#impute categorical data
+df2_imputed$is_cpo[is.na(df2_imputed$is_cpo)] = FALSE
+```
+
+### 5. Correlation Matrix
+
+One of the method in selecting feature to be used in the prediction is by looking at the correlation of the features to the target label. There are several
+
+```{r}
+#Create correlation matrix for all numerical column
+only_numeric<- df_imputed[numeric_cols] %>%
+na.omit()
+correlations <- cor(only_numeric)
+summary(correlations)
+correlations
+
+
+#Show correlation with price and sort from highest
+price_Cor<- correlations[, "price"]
+price_Cor<- sort(price_Cor, decreasing = TRUE)
+price_Cor
+
+corrplot(price_Cor, method = "color")
+
+#Pick numerical column with absolute value more than 0.3
+selected_numerical <- names(price_Cor[(price_Cor > 0.3)|(price_Cor < -0.3)])
+selected_numerical
+
+```
+
+### 6. Data Encoding
+
+Since not all model can accept categorical data, I transformed categorical feature was into one-hot encoded column using fastDummies. Only categorical feature that has less than 100 unique values that were transfomed.
+
+```{r}
+#transform selected categorical columns (less than 100 unique values) into one-hot encoded label
+selected_categorical = c("make_name","fuel_type","transmission","wheel_system","engine_type","franchise_dealer","frame_damaged","listing_color","is_new","isCab",'is_cpo')
+
+df_selected_columns = df_imputed[c("id",selected_numerical,selected_categorical)]
+df2_selected_columns = df2_imputed[colnames(df_selected_columns %>% select(-price))]
+
+
+df_encoded <- dummy_cols(df_selected_columns, select_columns = selected_categorical
+                 ,remove_selected_columns = TRUE)
+df2_encoded <- dummy_cols(df2_selected_columns, select_columns = selected_categorical
+                  ,remove_selected_columns = TRUE)
+
+
+df_encoded <- df_encoded %>% mutate(across(where(is.numeric), ~ifelse(is.na(.), median(., na.rm = TRUE), .)))
+df2_encoded <- df2_encoded %>% mutate(across(where(is.numeric), ~ifelse(is.na(.), median(., na.rm = TRUE), .)))
+```
+
+### 7. Splitting data into train-test
+
+prior to exploring various model to be tested, I split the data into train and test dataset. I chose 70:30 ratio for train and test dataset respectively.
+
+```{r}
+
+
+# Non one-hot encoded data
+df_to_use = df_selected_columns
+## filling na values
+df_to_use <- df_to_use %>% mutate(across(where(is.numeric), ~ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+colnames(df_to_use) <- tolower(colnames(df_to_use))
+colnames(df_to_use) <- gsub(" ", "_", colnames(df_to_use))
+colnames(df_to_use) <- sub("_$", "", colnames(df_to_use))
+colnames(df_to_use) <- sub("-", "_", colnames(df_to_use))
+
+## split the data into train-test
+set.seed(617)
+split= createDataPartition(y= df_to_use$price, p= 0.7, list= F, groups= 200)
+trainP= df_to_use[split,]
+testP= df_to_use[-split,]
+
+
+# Non one-hot encoded data
+df_to_use_enc = df_encoded
+## filling na values
+df_to_use_enc <- df_to_use_enc %>% mutate(across(where(is.numeric), ~ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+colnames(df_to_use_enc) <- tolower(colnames(df_to_use_enc))
+colnames(df_to_use_enc) <- gsub(" ", "_", colnames(df_to_use_enc))
+colnames(df_to_use_enc) <- sub("_$", "", colnames(df_to_use_enc))
+colnames(df_to_use_enc) <- sub("-", "_", colnames(df_to_use_enc))
+
+## split the data into train-test
+set.seed(617)
+split= createDataPartition(y= df_to_use_enc$price, p= 0.7, list= F, groups= 200)
+train_enc = df_to_use_enc[split,]
+test_enc = df_to_use_enc[-split,]
+
+colSums(is.na(trainP))
+```
+
+### 8. Model Exploration
+
+Some methods that were explored in this analysis are:
+
+1\. Random Forest (using Ranger Library)
+
+2\. Gradient Boosting Machine (GBM)
+
+3\. XGBoost
+
+The reason I chose these 3 models is due to it's edge on handling high dimensional data.
+
+#### 8.a. Random Forest
+
+```{r}
+set.seed(617)
+forest_ranger = ranger(price~.,
+                       data = trainP,
+                       num.trees = 1000
+                       )
+pred_test = predict(forest_ranger, data = trainP, num.trees = 1000)
+rmse_test_forest_ranger = sqrt(mean((pred_train$predictions - trainP$price)^2)); 
+rmse_test_forest_ranger
+
+
+
+```
+
+```{r}
+
+str(trainP)
+
+
+```
+
+#### 8.b. GBM
+
+```{r}
+set.seed(617)
+boost = gbm(price~.,
+            data=train_enc),
+            distribution="gaussian",
+            n.trees = 200,
+            interaction.depth = 10,
+            shrinkage = 0.081,
+            n.minobsinnode = 5)
+pred_test = predict(boost, n.trees=200, newdata = train_enc)
+rmse_test_boost = sqrt(mean((pred_test - train_enc$price)^2)); rmse_test_boost
+
+str(train_enc)
+```
+
+#### 8.c. XGBoost
+
+```{r}
+
+train
+trt = designTreatmentsZ(dframe = train_enc,
+                        varlist = names(subset(train_enc,select=-c(price))))
+
+newvars = trt$scoreFrame[trt$scoreFrame$code%in% c('clean','lev'),'varName']
+
+train_input = prepare(treatmentplan = trt, 
+                      dframe = train_enc,
+                      varRestriction = newvars)
+test_input = prepare(treatmentplan = trt, 
+                     dframe = test_enc,
+                     varRestriction = newvars)
+
+xgboost = xgboost(data=as.matrix(train_input), 
+                  label = train_enc$price,
+                  nrounds=100,
+                  verbose = 0,
+                  early_stopping_rounds = 100)
+xgboost$best_iteration
+
+pred = predict(xgboost, 
+               newdata=as.matrix(test_input))
+rmse_xgboost = sqrt(mean((pred - test_enc$price)^2)); rmse_xgboost
+
+```
+
+```{r}
+
+
+
+```
+
+## Result Summary
+
+Here are the RMSE of three different models:
+
+Random Forest (ranger): 2814
+
+(selected as submission on kaggle) GBM: 4043
+
+XGBoost: 4219
+
+I finally chose the random forest for the submission on Kaggle and it gave RMSE of 2,164, sats on the median of the leaderboard.
+
+## 
